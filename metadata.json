@@ -1,0 +1,6 @@
+{
+  "name": "CloudNumber - Global Virtual Numbers & OTP Verification",
+  "description": "Generate virtual phone numbers across 30+ countries to receive SMS OTP verification codes with live inbox and carrier tools.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
