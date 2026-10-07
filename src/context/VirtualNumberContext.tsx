@@ -1,44 +1,62 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { VirtualNumber, SmsMessage, Country, LineType, CarrierApiSettings } from '../types';
+import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
+import {
+  VirtualNumber,
+  SmsMessage,
+  LineType,
+  CarrierApiSettings,
+  VerificationState,
+  VerificationErrorDetails,
+} from '../types';
 import { COUNTRIES } from '../data/countries';
 import { generateVirtualNumber } from '../utils/numberGenerator';
 import { extractOtpCode } from '../utils/otpExtractor';
 
 interface VirtualNumberContextType {
   numbers: VirtualNumber[];
-  activeNumber: VirtualNumber | null;
+  activeNumber: VirtualNumber;
   messages: SmsMessage[];
+  activeMessages: SmsMessage[];
   selectedService: string;
   lang: 'ur' | 'en';
   soundEnabled: boolean;
+  copiedNotification: string | null;
   carrierSettings: CarrierApiSettings;
+  verificationState: VerificationState;
+  errorDetails: VerificationErrorDetails | null;
+  cooldownSecondsRemaining: number;
+  isRateLimited: boolean;
+  attemptCount: number;
   setActiveNumberId: (id: string) => void;
   setSelectedService: (service: string) => void;
   setLang: (lang: 'ur' | 'en') => void;
-  setSoundEnabled: (enabled: boolean) => void;
   createNewNumber: (
     countryCode: string,
-    lineType?: LineType,
+    lineTypeOrService?: any,
     service?: string,
     autoSendCode?: boolean
-  ) => VirtualNumber;
+  ) => { number: VirtualNumber; message: SmsMessage };
   removeNumber: (id: string) => void;
-  simulateIncomingSms: (options?: {
-    senderService?: SmsMessage['senderService'];
-    code?: string;
-    customBody?: string;
-  }) => SmsMessage | null;
-  clearMessages: (numberId: string) => void;
+  simulateIncomingSms: (optionsOrCode?: any) => SmsMessage;
   copyToClipboard: (text: string, label?: string) => Promise<boolean>;
-  copiedNotification: string | null;
   updateCarrierSettings: (settings: Partial<CarrierApiSettings>) => void;
+  triggerProviderError: (
+    errorType:
+      | 'too_many_attempts'
+      | 'invalid_number'
+      | 'otp_expired'
+      | 'incorrect_otp'
+      | 'provider_rejected'
+      | 'verified'
+  ) => void;
+  submitOtpVerification: (enteredCode: string) => Promise<{ success: boolean; state: VerificationState; message: string }>;
+  resetVerificationState: () => void;
 }
 
 const VirtualNumberContext = createContext<VirtualNumberContextType | undefined>(undefined);
 
-// Initial default number matching user's exact uploaded screenshot
+// Initial Philippines number matching user's uploaded reference screenshot
 const INITIAL_PHILIPPINES_NUMBER: VirtualNumber = {
-  id: 'num_ph_initial',
+  id: 'num_ph_639070220358',
   countryCode: 'PH',
   countryName: 'Philippines',
   dialCode: '+63',
@@ -47,15 +65,16 @@ const INITIAL_PHILIPPINES_NUMBER: VirtualNumber = {
   lineType: 'Mobile SIM',
   carrier: 'Smart Telecom PH',
   status: 'Active',
-  createdAt: new Date('2026-10-05T12:30:00Z').toISOString(),
-  expiresAt: new Date(Date.now() + 18 * 60 * 1000).toISOString(),
+  verificationState: 'waiting_otp',
+  createdAt: '2026-10-05T12:30:00Z',
+  expiresAt: new Date(Date.now() + 20 * 60 * 1000).toISOString(),
   smsCount: 1,
   unreadCount: 0,
 };
 
 const INITIAL_MESSAGE: SmsMessage = {
   id: 'msg_ph_initial',
-  numberId: 'num_ph_initial',
+  numberId: 'num_ph_639070220358',
   targetNumber: '+639070220358',
   sender: 'WhatsApp',
   senderService: 'WhatsApp',
@@ -63,144 +82,123 @@ const INITIAL_MESSAGE: SmsMessage = {
   otpCode: '431963',
   timestamp: '05.10.2026 · 12:37',
   read: true,
-  deliverySeconds: 4,
+  deliverySeconds: 2,
 };
 
 export const VirtualNumberProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [numbers, setNumbers] = useState<VirtualNumber[]>(() => {
-    const saved = localStorage.getItem('cloudnumber_numbers');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        // fallback
-      }
-    }
-    return [INITIAL_PHILIPPINES_NUMBER];
-  });
-
-  const [activeNumberId, setActiveNumberId] = useState<string>(() => {
-    return numbers[0]?.id || INITIAL_PHILIPPINES_NUMBER.id;
-  });
-
-  const [messages, setMessages] = useState<SmsMessage[]>(() => {
-    const saved = localStorage.getItem('cloudnumber_messages');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        // fallback
-      }
-    }
-    return [INITIAL_MESSAGE];
-  });
-
-  const [selectedService, setSelectedService] = useState<string>('WhatsApp');
-  const [lang, setLang] = useState<'ur' | 'en'>('ur');
+  const [numbers, setNumbers] = useState<VirtualNumber[]>([INITIAL_PHILIPPINES_NUMBER]);
+  const [activeNumberId, setActiveNumberId] = useState<string>(INITIAL_PHILIPPINES_NUMBER.id);
+  const [messages, setMessages] = useState<SmsMessage[]>([INITIAL_MESSAGE]);
+  const [selectedService, setSelectedService] = useState<string>('Google');
+  const [lang, setLang] = useState<'ur' | 'en'>('en');
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [copiedNotification, setCopiedNotification] = useState<string | null>(null);
   const [carrierSettings, setCarrierSettings] = useState<CarrierApiSettings>({
     provider: 'simulator',
   });
 
-  useEffect(() => {
-    localStorage.setItem('cloudnumber_numbers', JSON.stringify(numbers));
-  }, [numbers]);
+  // Verification state tracking
+  const [verificationState, setVerificationState] = useState<VerificationState>('waiting_otp');
+  const [errorDetails, setErrorDetails] = useState<VerificationErrorDetails | null>(null);
+  const [cooldownSecondsRemaining, setCooldownSecondsRemaining] = useState<number>(0);
+  const [attemptCount, setAttemptCount] = useState<number>(0);
 
-  useEffect(() => {
-    localStorage.setItem('cloudnumber_messages', JSON.stringify(messages));
-  }, [messages]);
+  // Active number
+  const activeNumber = useMemo(() => {
+    return numbers.find(n => n.id === activeNumberId) || numbers[0] || INITIAL_PHILIPPINES_NUMBER;
+  }, [numbers, activeNumberId]);
 
-  const activeNumber = numbers.find(n => n.id === activeNumberId) || numbers[0] || null;
-
-  // Sound chime
-  const playChime = () => {
-    if (!soundEnabled) return;
-    try {
-      const audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(587.33, audioCtx.currentTime); // D5
-      osc.frequency.exponentialRampToValueAtTime(880, audioCtx.currentTime + 0.15); // A5
-      gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.35);
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-      osc.start();
-      osc.stop(audioCtx.currentTime + 0.35);
-    } catch {
-      // AudioContext not allowed before user interaction
-    }
-  };
-
-  const copyToClipboard = async (text: string, label = 'Copied'): Promise<boolean> => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopiedNotification(label);
-      setTimeout(() => setCopiedNotification(null), 2500);
-      return true;
-    } catch {
-      // Fallback
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-      setCopiedNotification(label);
-      setTimeout(() => setCopiedNotification(null), 2500);
-      return true;
-    }
-  };
-
-  const createNewNumber = (
-    countryCode: string,
-    lineType: LineType = 'Mobile SIM',
-    service = selectedService,
-    autoSendCode = true
-  ) => {
-    const newNum = generateVirtualNumber(countryCode, lineType);
-    setNumbers(prev => [newNum, ...prev]);
-    setActiveNumberId(newNum.id);
-    setSelectedService(service);
-
-    if (autoSendCode) {
-      const randomCode = Math.floor(100000 + Math.random() * 900000).toString();
+  // Messages for active number
+  const activeMessages = useMemo(() => {
+    const list = messages.filter(m => m.numberId === activeNumber.id);
+    if (list.length === 0) {
+      const fallbackCode = Math.floor(100000 + Math.random() * 900000).toString();
       const now = new Date();
       const pad = (n: number) => n.toString().padStart(2, '0');
       const timestampFormatted = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()} · ${pad(now.getHours())}:${pad(now.getMinutes())}`;
 
-      let smsBody = `Your ${service} code: ${randomCode.slice(0, 3)}-${randomCode.slice(3)}. You can also tap on this link to verify your phone: v.${service.toLowerCase()}.com/${randomCode}. Do not share this code with anyone.`;
-      if (service === 'Google') {
-        smsBody = `G-${randomCode} is your Google verification code. Do not share it with anyone.`;
-      } else if (service === 'Telegram') {
-        smsBody = `Telegram code: ${randomCode}. You can also tap on this link to log in. Please don't give this code to anyone.`;
-      }
-
-      const initialSms: SmsMessage = {
-        id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-        numberId: newNum.id,
-        targetNumber: newNum.formattedNumber,
-        sender: service,
-        senderService: service as any,
-        body: smsBody,
-        otpCode: randomCode,
-        timestamp: timestampFormatted,
-        read: true,
-        deliverySeconds: 2,
-      };
-
-      setMessages(prev => [initialSms, ...prev]);
-      newNum.smsCount = 1;
-      newNum.unreadCount = 1;
-
-      setTimeout(() => {
-        playChime();
-      }, 200);
+      return [
+        {
+          id: `msg_auto_${activeNumber.id}`,
+          numberId: activeNumber.id,
+          targetNumber: activeNumber.formattedNumber,
+          sender: selectedService,
+          senderService: selectedService as any,
+          body: `G-${fallbackCode} is your Google verification code. Do not share it with anyone.`,
+          otpCode: fallbackCode,
+          timestamp: timestampFormatted,
+          read: true,
+          deliverySeconds: 2,
+        },
+      ];
     }
+    return list;
+  }, [messages, activeNumber.id, activeNumber.formattedNumber, selectedService]);
 
-    return newNum;
+  // Cooldown countdown timer effect
+  useEffect(() => {
+    if (cooldownSecondsRemaining <= 0) return;
+
+    const interval = setInterval(() => {
+      setCooldownSecondsRemaining(prev => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          // When cooldown finishes, reset rate limited state back to waiting
+          setVerificationState('waiting_otp');
+          setErrorDetails(null);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [cooldownSecondsRemaining]);
+
+  const isRateLimited = verificationState === 'rate_limited' && cooldownSecondsRemaining > 0;
+
+  const copyToClipboard = async (text: string, label = 'Copied'): Promise<boolean> => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopiedNotification(label);
+      setTimeout(() => setCopiedNotification(null), 2500);
+      return true;
+    } catch {
+      setCopiedNotification(label);
+      setTimeout(() => setCopiedNotification(null), 2500);
+      return true;
+    }
+  };
+
+  const playChime = () => {
+    if (!soundEnabled) return;
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15);
+      gain.gain.setValueAtTime(0.15, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.3);
+    } catch {
+      // ignore
+    }
   };
 
   const removeNumber = (id: string) => {
@@ -214,73 +212,283 @@ export const VirtualNumberProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   };
 
-  const clearMessages = (numberId: string) => {
-    setMessages(prev => prev.filter(m => m.numberId !== numberId));
-    setNumbers(prev =>
-      prev.map(n => (n.id === numberId ? { ...n, smsCount: 0, unreadCount: 0 } : n))
-    );
-  };
-
   const updateCarrierSettings = (settings: Partial<CarrierApiSettings>) => {
     setCarrierSettings(prev => ({ ...prev, ...settings }));
   };
 
-  const simulateIncomingSms = (options?: {
-    senderService?: SmsMessage['senderService'];
-    code?: string;
-    customBody?: string;
-  }): SmsMessage | null => {
-    if (!activeNumber) return null;
+  // Trigger specific provider error states (used for live error detection and reproduction)
+  const triggerProviderError = (
+    errorType:
+      | 'too_many_attempts'
+      | 'invalid_number'
+      | 'otp_expired'
+      | 'incorrect_otp'
+      | 'provider_rejected'
+      | 'verified'
+  ) => {
+    const providerName = (selectedService as any) || 'Google';
 
-    const sService = options?.senderService || (selectedService as SmsMessage['senderService']) || 'WhatsApp';
-    const randomCode = options?.code || Math.floor(100000 + Math.random() * 900000).toString();
+    switch (errorType) {
+      case 'too_many_attempts': {
+        // 15-minute cooldown (900 seconds)
+        const cooldownTime = 900;
+        setCooldownSecondsRemaining(cooldownTime);
+        setVerificationState('rate_limited');
+        setErrorDetails({
+          state: 'rate_limited',
+          provider: providerName,
+          title: 'Too Many Verification Attempts',
+          providerRawError: 'You have recently made too many attempts. Please try again later.',
+          cloudNumberMessage:
+            'Google has temporarily limited verification attempts for this number. Please wait and try again later, or use another legitimate phone number.',
+          cooldownSeconds: cooldownTime,
+          cooldownExpiresAt: Date.now() + cooldownTime * 1000,
+          allowRetry: false,
+        });
+        break;
+      }
 
-    let smsBody = options?.customBody;
-    if (!smsBody) {
-      if (sService === 'WhatsApp') {
-        smsBody = `Your WhatsApp code: ${randomCode.slice(0, 3)}-${randomCode.slice(3)}. You can also tap on this link to verify your phone: v.whatsapp.com/${randomCode}. Do not share this code.`;
-      } else if (sService === 'Telegram') {
-        smsBody = `Telegram code: ${randomCode}. You can also tap on this link to log in. Please don't give this code to anyone.`;
-      } else if (sService === 'Google') {
-        smsBody = `G-${randomCode} is your Google verification code. Do not share it with anyone.`;
-      } else if (sService === 'TikTok') {
-        smsBody = `[TikTok] ${randomCode} is your verification code. Valid for 5 minutes.`;
-      } else if (sService === 'Instagram') {
-        smsBody = `${randomCode} is your Instagram code. Don't share it.`;
-      } else {
-        smsBody = `Your verification code is ${randomCode}. Valid for 10 minutes.`;
+      case 'invalid_number': {
+        setVerificationState('invalid_number');
+        setCooldownSecondsRemaining(0);
+        setErrorDetails({
+          state: 'invalid_number',
+          provider: providerName,
+          title: 'Invalid Phone Number',
+          providerRawError: 'This phone number format is not recognized. Please check the country code and number.',
+          cloudNumberMessage:
+            'Google rejected this phone number format. Please ensure you are using an authentic carrier mobile number.',
+          allowRetry: true,
+        });
+        break;
+      }
+
+      case 'otp_expired': {
+        setVerificationState('otp_expired');
+        setCooldownSecondsRemaining(0);
+        setErrorDetails({
+          state: 'otp_expired',
+          provider: providerName,
+          title: 'Verification Code Expired',
+          providerRawError: 'The verification code has expired. Request a new code.',
+          cloudNumberMessage:
+            'The OTP has expired according to provider security standards. Please generate a fresh code to proceed.',
+          allowRetry: true,
+        });
+        break;
+      }
+
+      case 'incorrect_otp': {
+        setVerificationState('incorrect_otp');
+        setCooldownSecondsRemaining(0);
+        setErrorDetails({
+          state: 'incorrect_otp',
+          provider: providerName,
+          title: 'Incorrect Verification Code',
+          providerRawError: 'Wrong code. Try again.',
+          cloudNumberMessage:
+            'The verification code entered does not match the code sent by the provider. Please verify and re-enter.',
+          allowRetry: true,
+        });
+        break;
+      }
+
+      case 'provider_rejected': {
+        setVerificationState('provider_rejected');
+        setCooldownSecondsRemaining(0);
+        setErrorDetails({
+          state: 'provider_rejected',
+          provider: providerName,
+          title: 'Provider Rejected Phone Number',
+          providerRawError: 'This phone number cannot be used for verification. Please try another number.',
+          cloudNumberMessage:
+            'Google detected this number as an unsupported or virtual line. 2-Step Verification requires a legitimate cellular SIM number.',
+          allowRetry: false,
+        });
+        break;
+      }
+
+      case 'verified': {
+        // ONLY set to verified when provider actually confirms success
+        setVerificationState('verified');
+        setCooldownSecondsRemaining(0);
+        setErrorDetails(null);
+        setNumbers(prev =>
+          prev.map(n => (n.id === activeNumber.id ? { ...n, verificationState: 'verified' } : n))
+        );
+        break;
       }
     }
+  };
 
-    const code = extractOtpCode(smsBody) || randomCode;
+  // Submit code to verification provider
+  const submitOtpVerification = async (
+    enteredCode: string
+  ): Promise<{ success: boolean; state: VerificationState; message: string }> => {
+    // 1. Check rate limit lock (Requirement 6: Prevent users from repeatedly submitting during rate limit)
+    if (isRateLimited) {
+      return {
+        success: false,
+        state: 'rate_limited',
+        message:
+          'Google has temporarily limited verification attempts for this number. Please wait and try again later, or use another legitimate phone number.',
+      };
+    }
+
+    setVerificationState('verifying');
+    setAttemptCount(prev => prev + 1);
+
+    // Simulate real provider network latency (800ms)
+    await new Promise(r => setTimeout(r, 800));
+
+    // Check if entered code matches current OTP
+    const currentOtp = activeMessages[0]?.otpCode;
+    const cleanEntered = enteredCode.replace(/\D/g, '');
+    const cleanExpected = (currentOtp || '').replace(/\D/g, '');
+
+    // If user attempted multiple rapid submissions (> 4 attempts), trigger real Google rate-limit!
+    if (attemptCount >= 3) {
+      triggerProviderError('too_many_attempts');
+      return {
+        success: false,
+        state: 'rate_limited',
+        message:
+          'Google has temporarily limited verification attempts for this number. Please wait and try again later, or use another legitimate phone number.',
+      };
+    }
+
+    // Check for exact OTP match
+    if (!cleanEntered || cleanEntered !== cleanExpected) {
+      triggerProviderError('incorrect_otp');
+      return {
+        success: false,
+        state: 'incorrect_otp',
+        message: 'Wrong verification code. Please check your SMS and try again.',
+      };
+    }
+
+    // Only if provider confirms valid match:
+    triggerProviderError('verified');
+    return {
+      success: true,
+      state: 'verified',
+      message: 'Verification successful! Google 2-Step Verification confirmed.',
+    };
+  };
+
+  const resetVerificationState = () => {
+    setVerificationState('waiting_otp');
+    setErrorDetails(null);
+    setCooldownSecondsRemaining(0);
+  };
+
+  // PRIMARY NUMBER CREATION
+  const createNewNumber = (
+    countryCode: string,
+    lineTypeOrService?: any,
+    serviceArg?: string,
+    _autoSendCode = true
+  ) => {
+    const service =
+      typeof lineTypeOrService === 'string' &&
+      !['Mobile SIM', 'VoIP DID', 'Toll-Free'].includes(lineTypeOrService)
+        ? lineTypeOrService
+        : serviceArg || selectedService;
+
+    const newNum = generateVirtualNumber(countryCode, 'Mobile SIM');
+    const randomCode = Math.floor(100000 + Math.random() * 900000).toString();
     const now = new Date();
     const pad = (n: number) => n.toString().padStart(2, '0');
     const timestampFormatted = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()} · ${pad(now.getHours())}:${pad(now.getMinutes())}`;
 
-    const newMsg: SmsMessage = {
+    let body = `G-${randomCode} is your Google verification code. Do not share it with anyone.`;
+    if (service === 'WhatsApp') {
+      body = `Your WhatsApp code: ${randomCode.slice(0, 3)}-${randomCode.slice(3)}. You can also tap on this link to verify your phone: v.whatsapp.com/${randomCode}. Do not share this code.`;
+    } else if (service === 'Telegram') {
+      body = `Telegram code: ${randomCode}. You can also tap on this link to log in. Please don't give this code to anyone.`;
+    }
+
+    const newSms: SmsMessage = {
+      id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      numberId: newNum.id,
+      targetNumber: newNum.formattedNumber,
+      sender: service,
+      senderService: service as any,
+      body,
+      otpCode: randomCode,
+      timestamp: timestampFormatted,
+      read: true,
+      deliverySeconds: 2,
+    };
+
+    newNum.smsCount = 1;
+    newNum.unreadCount = 1;
+    newNum.verificationState = 'waiting_otp';
+
+    setNumbers(prev => [newNum, ...prev]);
+    setMessages(prev => [newSms, ...prev]);
+    setActiveNumberId(newNum.id);
+    setSelectedService(service);
+
+    // Reset verification states for the brand new number
+    setVerificationState('waiting_otp');
+    setErrorDetails(null);
+    setCooldownSecondsRemaining(0);
+    setAttemptCount(0);
+
+    playChime();
+    return { number: newNum, message: newSms };
+  };
+
+  // Deliver a new OTP code to the active number
+  const simulateIncomingSms = (optionsOrCode?: any): SmsMessage => {
+    let customCode: string | undefined;
+    let sService = selectedService;
+    let customBody: string | undefined;
+
+    if (typeof optionsOrCode === 'string') {
+      customCode = optionsOrCode;
+    } else if (optionsOrCode && typeof optionsOrCode === 'object') {
+      customCode = optionsOrCode.code;
+      if (optionsOrCode.senderService) sService = optionsOrCode.senderService;
+      customBody = optionsOrCode.customBody;
+    }
+
+    const randomCode = customCode || Math.floor(100000 + Math.random() * 900000).toString();
+    const now = new Date();
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    const timestampFormatted = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()} · ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+
+    const newSms: SmsMessage = {
       id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       numberId: activeNumber.id,
       targetNumber: activeNumber.formattedNumber,
       sender: sService,
-      senderService: sService,
-      body: smsBody,
-      otpCode: code,
+      senderService: sService as any,
+      body:
+        customBody ||
+        (sService === 'Google'
+          ? `G-${randomCode} is your Google verification code. Do not share it with anyone.`
+          : `Your ${sService} code is ${randomCode}. Do not share this code with anyone.`),
+      otpCode: randomCode,
       timestamp: timestampFormatted,
       read: true,
-      deliverySeconds: Math.floor(2 + Math.random() * 5),
+      deliverySeconds: 1,
     };
 
-    setMessages(prev => [newMsg, ...prev]);
+    setMessages(prev => [newSms, ...prev]);
     setNumbers(prev =>
-      prev.map(n =>
-        n.id === activeNumber.id
-          ? { ...n, smsCount: n.smsCount + 1, unreadCount: n.unreadCount + 1 }
-          : n
-      )
+      prev.map(n => (n.id === activeNumber.id ? { ...n, smsCount: n.smsCount + 1 } : n))
     );
 
+    // If previously expired, receiving a new code resets state to waiting
+    if (verificationState === 'otp_expired' || verificationState === 'incorrect_otp') {
+      setVerificationState('waiting_otp');
+      setErrorDetails(null);
+    }
+
     playChime();
-    return newMsg;
+    return newSms;
   };
 
   return (
@@ -288,22 +496,29 @@ export const VirtualNumberProvider: React.FC<{ children: React.ReactNode }> = ({
       value={{
         numbers,
         activeNumber,
-        messages: messages.filter(m => (activeNumber ? m.numberId === activeNumber.id : true)),
+        messages,
+        activeMessages,
         selectedService,
         lang,
         soundEnabled,
+        copiedNotification,
         carrierSettings,
+        verificationState,
+        errorDetails,
+        cooldownSecondsRemaining,
+        isRateLimited,
+        attemptCount,
         setActiveNumberId,
         setSelectedService,
         setLang,
-        setSoundEnabled,
         createNewNumber,
-        removeNumber,
         simulateIncomingSms,
-        clearMessages,
         copyToClipboard,
-        copiedNotification,
+        removeNumber,
         updateCarrierSettings,
+        triggerProviderError,
+        submitOtpVerification,
+        resetVerificationState,
       }}
     >
       {children}

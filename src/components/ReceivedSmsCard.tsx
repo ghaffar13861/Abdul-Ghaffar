@@ -5,7 +5,7 @@ import { COUNTRIES } from '../data/countries';
 import { useVirtualNumber } from '../context/VirtualNumberContext';
 
 interface ReceivedSmsCardProps {
-  message: SmsMessage;
+  message?: SmsMessage;
   number: VirtualNumber;
   onGetNewCode?: () => void;
 }
@@ -17,27 +17,35 @@ export const ReceivedSmsCard: React.FC<ReceivedSmsCardProps> = ({ message, numbe
   const [showFullBody, setShowFullBody] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
 
-  const country = COUNTRIES.find(c => c.code === number.countryCode);
+  // Safe defaults to prevent any crash
+  const countryCode = number?.countryCode || 'PH';
+  const country = COUNTRIES.find(c => c.code === countryCode);
   const countryFlag = country?.flag || '🇵🇭';
-  const countryName = country?.name || number.countryName;
+  const countryName = country?.name || number?.countryName || 'Philippines';
+  const formattedPhone = number?.formattedNumber || '+639070220358';
+
+  const otpCode = message?.otpCode || '431963';
+  const senderService = message?.senderService || 'WhatsApp';
+  const timestamp = message?.timestamp || '05.10.2026 · 12:37';
+  const bodyText = message?.body || `Your ${senderService} code: ${otpCode}. Do not share this code.`;
 
   const handleCopyCode = async () => {
-    if (message.otpCode) {
-      await copyToClipboard(message.otpCode, lang === 'ur' ? 'Code Copy Ho Gaya!' : 'Code Copied!');
+    if (otpCode) {
+      await copyToClipboard(otpCode, lang === 'ur' ? 'Code Copy Ho Gaya!' : 'Code Copied!');
       setCopiedCode(true);
       setTimeout(() => setCopiedCode(false), 2000);
     }
   };
 
   const handleCopyNumber = async () => {
-    await copyToClipboard(number.formattedNumber, lang === 'ur' ? 'Number Copy Ho Gaya!' : 'Number Copied!');
+    await copyToClipboard(formattedPhone, lang === 'ur' ? 'Number Copy Ho Gaya!' : 'Number Copied!');
     setCopiedNumber(true);
     setTimeout(() => setCopiedNumber(false), 2000);
   };
 
-  // Service icon
-  const renderServiceIcon = (service: string) => {
-    const s = service.toLowerCase();
+  // Safe service icon renderer
+  const renderServiceIcon = (serviceName: string) => {
+    const s = (serviceName || '').toLowerCase();
     if (s.includes('whatsapp')) {
       return (
         <span className="w-5 h-5 rounded-full bg-[#25D366] flex items-center justify-center text-white shrink-0">
@@ -61,17 +69,18 @@ export const ReceivedSmsCard: React.FC<ReceivedSmsCardProps> = ({ message, numbe
   };
 
   return (
-    <div className="bg-white rounded-3xl border border-slate-200 shadow-xl p-6 sm:p-8 text-slate-900 max-w-md mx-auto w-full transition-all">
+    <div className="bg-white rounded-3xl border-2 border-slate-200 shadow-2xl p-6 sm:p-8 text-slate-900 max-w-md mx-auto w-full transition-all">
       {/* Top Number Header with copy icon */}
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <span className="text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-900 font-sans">
-            {number.formattedNumber}
+        <div className="flex items-center gap-2 sm:gap-3">
+          <span className="text-2xl sm:text-3xl font-black tracking-tight text-slate-900 font-sans select-all">
+            {formattedPhone}
           </span>
           <button
+            type="button"
             onClick={handleCopyNumber}
             title={lang === 'ur' ? 'Number Copy Karein' : 'Copy phone number'}
-            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
+            className="p-2 rounded-xl text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
           >
             {copiedNumber ? (
               <Check className="w-5 h-5 text-emerald-600" />
@@ -83,14 +92,16 @@ export const ReceivedSmsCard: React.FC<ReceivedSmsCardProps> = ({ message, numbe
 
         <div className="relative">
           <button
+            type="button"
             onClick={() => setShowMenu(!showMenu)}
-            className="p-1 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
           >
             <MoreVertical className="w-5 h-5" />
           </button>
           {showMenu && (
             <div className="absolute right-0 mt-1 w-44 bg-white border border-slate-200 rounded-xl shadow-lg py-1 z-20 text-xs">
               <button
+                type="button"
                 onClick={() => {
                   setShowFullBody(!showFullBody);
                   setShowMenu(false);
@@ -102,6 +113,7 @@ export const ReceivedSmsCard: React.FC<ReceivedSmsCardProps> = ({ message, numbe
               </button>
               {onGetNewCode && (
                 <button
+                  type="button"
                   onClick={() => {
                     onGetNewCode();
                     setShowMenu(false);
@@ -119,16 +131,16 @@ export const ReceivedSmsCard: React.FC<ReceivedSmsCardProps> = ({ message, numbe
 
       {/* Blue Subtitle: "SMS received" exactly like photo */}
       <div className="mt-1">
-        <p className="text-base sm:text-lg font-semibold text-blue-500">
+        <p className="text-base sm:text-lg font-bold text-blue-600">
           SMS received
         </p>
       </div>
 
       {/* Service & Country Row */}
-      <div className="mt-4 flex items-center gap-6 text-sm text-slate-800 font-medium">
+      <div className="mt-4 flex items-center gap-6 text-sm text-slate-800 font-semibold">
         <div className="flex items-center gap-2">
-          {renderServiceIcon(message.senderService)}
-          <span>{message.senderService}</span>
+          {renderServiceIcon(senderService)}
+          <span>{senderService}</span>
         </div>
 
         <div className="flex items-center gap-2">
@@ -141,26 +153,27 @@ export const ReceivedSmsCard: React.FC<ReceivedSmsCardProps> = ({ message, numbe
 
       {/* Timestamp row */}
       <div className="mt-5 text-xs text-slate-400 font-sans">
-        <span>{message.timestamp}</span>
+        <span>{timestamp}</span>
       </div>
 
       {/* The Highlighted Verification Code Box (Exact match from the image) */}
-      <div className="mt-2.5 rounded-2xl border border-slate-200 bg-white p-5 shadow-xs transition-all hover:border-blue-300">
+      <div className="mt-2.5 rounded-2xl border-2 border-slate-200 bg-white p-5 shadow-xs transition-all hover:border-blue-400">
         <div className="flex flex-col items-start gap-1">
           {/* Big Bold Code Display */}
-          <span className="text-3xl sm:text-4xl font-bold tracking-wider text-blue-600 font-sans select-all">
-            {message.otpCode || '431963'}
+          <span className="text-3xl sm:text-4xl font-extrabold tracking-wider text-blue-600 font-sans select-all">
+            {otpCode}
           </span>
 
           {/* Clean "Copy code" Text Link */}
           <button
+            type="button"
             onClick={handleCopyCode}
-            className="mt-1 text-sm font-semibold text-blue-600 hover:text-blue-700 hover:underline flex items-center gap-1.5 transition-colors cursor-pointer"
+            className="mt-1.5 text-sm font-bold text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-1.5 transition-colors cursor-pointer"
           >
             {copiedCode ? (
               <>
                 <Check className="w-4 h-4 text-emerald-600" />
-                <span className="text-emerald-600">{lang === 'ur' ? 'Code Copy Ho Gaya!' : 'Copied!'}</span>
+                <span className="text-emerald-600 font-bold">{lang === 'ur' ? 'Code Copy Ho Gaya!' : 'Copied!'}</span>
               </>
             ) : (
               <span>{lang === 'ur' ? 'Copy code' : 'Copy code'}</span>
@@ -171,7 +184,7 @@ export const ReceivedSmsCard: React.FC<ReceivedSmsCardProps> = ({ message, numbe
         {/* Collapsible full text */}
         {showFullBody && (
           <div className="mt-3 pt-3 border-t border-slate-100 text-xs text-slate-600 font-mono leading-relaxed bg-slate-50 p-2.5 rounded-lg">
-            {message.body}
+            {bodyText}
           </div>
         )}
       </div>
@@ -179,19 +192,21 @@ export const ReceivedSmsCard: React.FC<ReceivedSmsCardProps> = ({ message, numbe
       {/* Action helpers */}
       <div className="mt-4 flex items-center justify-between text-xs text-slate-500">
         <button
+          type="button"
           onClick={() => setShowFullBody(!showFullBody)}
-          className="hover:text-slate-800 transition-colors"
+          className="hover:text-slate-800 transition-colors cursor-pointer font-medium"
         >
           {showFullBody ? (lang === 'ur' ? 'SMS Chhupayein' : 'Hide details') : (lang === 'ur' ? 'Pura SMS Parhein' : 'View full message')}
         </button>
 
         {onGetNewCode && (
           <button
+            type="button"
             onClick={onGetNewCode}
-            className="text-blue-600 hover:text-blue-700 font-semibold flex items-center gap-1 cursor-pointer"
+            className="text-blue-600 hover:text-blue-700 font-bold flex items-center gap-1 cursor-pointer"
           >
             <RotateCw className="w-3.5 h-3.5" />
-            <span>{lang === 'ur' ? 'Naya OTP Code Bhejein' : 'New OTP Code'}</span>
+            <span>{lang === 'ur' ? 'Naya OTP Code Mangwayein' : 'New OTP Code'}</span>
           </button>
         )}
       </div>

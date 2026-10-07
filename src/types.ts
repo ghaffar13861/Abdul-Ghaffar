@@ -15,6 +15,28 @@ export interface Country {
   popularServices: string[];
 }
 
+export type VerificationState =
+  | 'idle'
+  | 'waiting_otp'
+  | 'verifying'
+  | 'rate_limited'
+  | 'invalid_number'
+  | 'otp_expired'
+  | 'incorrect_otp'
+  | 'provider_rejected'
+  | 'verified';
+
+export interface VerificationErrorDetails {
+  state: VerificationState;
+  provider: 'Google' | 'WhatsApp' | 'Telegram' | 'TikTok' | 'Facebook' | 'Instagram' | 'Other';
+  title: string;
+  providerRawError: string;
+  cloudNumberMessage: string;
+  cooldownSeconds?: number;
+  cooldownExpiresAt?: number;
+  allowRetry: boolean;
+}
+
 export interface VirtualNumber {
   id: string;
   countryCode: string;
@@ -29,6 +51,7 @@ export interface VirtualNumber {
   expiresAt: string;
   smsCount: number;
   unreadCount: number;
+  verificationState?: VerificationState;
   isFavorite?: boolean;
 }
 
